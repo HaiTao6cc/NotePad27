@@ -26,7 +26,6 @@ import android.content.Context;
 import android.content.UriMatcher;
 import android.content.ContentProvider.PipeDataWriter;
 import android.content.res.AssetFileDescriptor;
-import android.content.res.Resources;
 import android.database.Cursor;
 import android.database.SQLException;
 import android.database.sqlite.SQLiteDatabase;
@@ -63,7 +62,7 @@ public class NotePadProvider extends ContentProvider implements PipeDataWriter<C
     /**
      * The database version
      */
-    private static final int DATABASE_VERSION = 2;
+    private static final int DATABASE_VERSION = 3;
 
     /**
      * A projection map used to select columns from the database
@@ -156,6 +155,11 @@ public class NotePadProvider extends ContentProvider implements PipeDataWriter<C
                 NotePad.Notes.COLUMN_NAME_MODIFICATION_DATE,
                 NotePad.Notes.COLUMN_NAME_MODIFICATION_DATE);
 
+        // Maps "category" to "category"
+        sNotesProjectionMap.put(
+                NotePad.Notes.COLUMN_NAME_CATEGORY,
+                NotePad.Notes.COLUMN_NAME_CATEGORY);
+
         /*
          * Creates an initializes a projection map for handling Live Folders
          */
@@ -196,23 +200,37 @@ public class NotePadProvider extends ContentProvider implements PipeDataWriter<C
                    + NotePad.Notes.COLUMN_NAME_TITLE + " TEXT,"
                    + NotePad.Notes.COLUMN_NAME_NOTE + " TEXT,"
                    + NotePad.Notes.COLUMN_NAME_CREATE_DATE + " INTEGER,"
-                   + NotePad.Notes.COLUMN_NAME_MODIFICATION_DATE + " INTEGER"
+                   + NotePad.Notes.COLUMN_NAME_MODIFICATION_DATE + " INTEGER,"
+                   + NotePad.Notes.COLUMN_NAME_CATEGORY + " TEXT DEFAULT '"
+                   + NotePad.Notes.DEFAULT_CATEGORY + "'"
                    + ");");
        }
 
        /**
         *
         * Demonstrates that the provider must consider what happens when the
-        * underlying datastore is changed. In this sample, the database is upgraded the database
-        * by destroying the existing data.
-        * A real application should upgrade the database in place.
+        * underlying datastore is changed. 升级时尽量保留已有笔记：
+        * 从 2 升到 3 只是新增 category 列，不会删除数据；其他情况才重建表。
         */
        @Override
        public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
 
            // Logs that the database is being upgraded
            Log.w(TAG, "Upgrading database from version " + oldVersion + " to "
-                   + newVersion + ", which will destroy all old data");
+                   + newVersion);
+
+           if (oldVersion < 3) {
+               // 旧版本没有 category 列，直接加一列并给已有笔记一个默认分类
+               try {
+                   db.execSQL("ALTER TABLE " + NotePad.Notes.TABLE_NAME
+                           + " ADD COLUMN " + NotePad.Notes.COLUMN_NAME_CATEGORY
+                           + " TEXT DEFAULT '" + NotePad.Notes.DEFAULT_CATEGORY + "'");
+                   Log.i(TAG, "Added category column, existing notes kept");
+                   return;
+               } catch (SQLException e) {
+                   Log.w(TAG, "ALTER TABLE failed, recreating table", e);
+               }
+           }
 
            // Kills the table and existing data
            db.execSQL("DROP TABLE IF EXISTS notes");
@@ -529,15 +547,20 @@ public class NotePadProvider extends ContentProvider implements PipeDataWriter<C
             values.put(NotePad.Notes.COLUMN_NAME_MODIFICATION_DATE, now);
         }
 
-        // If the values map doesn't contain a title, sets the value to the default title.
+        // If the values map doesn't contain a title, sets the value to an empty title.
+        // 标题留空：由编辑界面在保存时根据正文自动生成，这样新笔记不会显示成"未命名"。
         if (values.containsKey(NotePad.Notes.COLUMN_NAME_TITLE) == false) {
-            Resources r = Resources.getSystem();
-            values.put(NotePad.Notes.COLUMN_NAME_TITLE, r.getString(android.R.string.untitled));
+            values.put(NotePad.Notes.COLUMN_NAME_TITLE, "");
         }
 
         // If the values map doesn't contain note text, sets the value to an empty string.
         if (values.containsKey(NotePad.Notes.COLUMN_NAME_NOTE) == false) {
             values.put(NotePad.Notes.COLUMN_NAME_NOTE, "");
+        }
+
+        // 新笔记默认分类
+        if (values.containsKey(NotePad.Notes.COLUMN_NAME_CATEGORY) == false) {
+            values.put(NotePad.Notes.COLUMN_NAME_CATEGORY, NotePad.Notes.DEFAULT_CATEGORY);
         }
 
         // Opens the database object in "write" mode.

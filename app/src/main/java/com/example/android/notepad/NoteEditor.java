@@ -16,15 +16,15 @@
 
 package com.example.android.notepad;
 
-import static com.example.android.notepad.R.*;
-
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.res.Resources;
 import android.database.Cursor;
@@ -32,41 +32,51 @@ import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.util.AttributeSet;
 import android.util.Log;
 import android.view.Menu;
 import android.view.MenuInflater;
 import android.view.MenuItem;
+import android.view.View;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
+import android.widget.ImageButton;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 
 /**
- * This Activity handles "editing" a note, where editing is responding to
- * {@link Intent#ACTION_VIEW} (request to view data), edit a note
- * {@link Intent#ACTION_EDIT}, create a note {@link Intent#ACTION_INSERT}, or
- * create a new note from the current contents of the clipboard {@link Intent#ACTION_PASTE}.
+ * 笔记编辑界面。
  *
- * NOTE: Notice that the provider operations in this Activity are taking place on the UI thread.
- * This is not a good practice. It is only done here to make the code more readable. A real
- * application should use the {@link android.content.AsyncQueryHandler}
- * or {@link android.os.AsyncTask} object to perform operations asynchronously on a separate thread.
+ * 相比原始示例新增：
+ * 1. 独立的标题输入框，标题可直接编辑（供列表按标题搜索）；
+ * 2. 顶部/底部的分类选择与时间信息；
+ * 3. 跟随设置变化的背景色；
+ * 4. 自绘横向操作栏（返回 / 删除 / 保存），不依赖系统 ActionBar。
  */
 public class NoteEditor extends Activity {
     // For logging and debugging purposes
     private static final String TAG = "NoteEditor";
 
-    /*
-     * Creates a projection that returns the note ID and the note contents.
-     */
-    private static final String[] PROJECTION =
-        new String[] {
+    /** 查询笔记所需的列 */
+    private static final String[] PROJECTION = new String[] {
             NotePad.Notes._ID,
             NotePad.Notes.COLUMN_NAME_TITLE,
-            NotePad.Notes.COLUMN_NAME_NOTE
+            NotePad.Notes.COLUMN_NAME_NOTE,
+            NotePad.Notes.COLUMN_NAME_MODIFICATION_DATE,
+            NotePad.Notes.COLUMN_NAME_CATEGORY,
     };
+
+    private static final String TIME_PATTERN = "yyyy年MM月dd日 HH:mm";
 
     // A label for the saved state of the activity
     private static final String ORIGINAL_CONTENT = "origContent";
+    private static final String ORIGINAL_TITLE = "origTitle";
 
     // This Activity can be started by more than one action. Each action is represented
     // as a "state" constant
@@ -77,8 +87,20 @@ public class NoteEditor extends Activity {
     private int mState;
     private Uri mUri;
     private Cursor mCursor;
+    private EditText mTitle;
     private EditText mText;
+    private TextView mTimeView;
+    private ChipBar mCategoryBar;
+
+    private String mCategory = NotePad.Notes.DEFAULT_CATEGORY;
     private String mOriginalContent;
+    private String mOriginalTitle;
+    private long mModifiedMillis;
+
+    /** 上次从数据库读出来的内容，用于判断是否真的有改动 */
+    private String mLoadedContent = "";
+    private String mLoadedTitle = "";
+    private String mLoadedCategory = NotePad.Notes.DEFAULT_CATEGORY;
 
     /**
      * Defines a custom EditText View that draws lines between each line of text that is displayed.
@@ -95,7 +117,8 @@ public class NoteEditor extends Activity {
             mRect = new Rect();
             mPaint = new Paint();
             mPaint.setStyle(Paint.Style.STROKE);
-            mPaint.setColor(0x800000FF);
+            mPaint.setColor(0x334C6FFF);
+            mPaint.setStrokeWidth(1f);
         }
 
         /**
@@ -141,18 +164,10 @@ public class NoteEditor extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        /*
-         * Creates an Intent to use when the Activity object's result is sent back to the
-         * caller.
-         */
         final Intent intent = getIntent();
-
-        /*
-         *  Sets up for the edit, based on the action specified for the incoming Intent.
-         */
-
-        // Gets the action that triggered the intent filter for this Activity
         final String action = intent.getAction();
+
+        boolean paste = false;
 
         // For an edit action:
         if (Intent.ACTION_EDIT.equals(action)) {
@@ -168,7 +183,8 @@ public class NoteEditor extends Activity {
             // Sets the Activity state to INSERT, gets the general note URI, and inserts an
             // empty record in the provider
             mState = STATE_INSERT;
-            mUri = getContentResolver().insert(intent.getData(), null);
+            Uri target = intent.getData() == null ? NotePad.Notes.CONTENT_URI : intent.getData();
+            mUri = getContentResolver().insert(target, null);
 
             /*
              * If the attempt to insert the new note fails, shuts down this Activity. The
@@ -178,7 +194,7 @@ public class NoteEditor extends Activity {
             if (mUri == null) {
 
                 // Writes the log identifier, a message, and the URI that failed.
-                Log.e(TAG, "Failed to insert new note into " + getIntent().getData());
+                Log.e(TAG, "Failed to insert new note into " + target);
 
                 // Closes the activity.
                 finish();
@@ -186,8 +202,9 @@ public class NoteEditor extends Activity {
             }
 
             // Since the new entry was created, this sets the result to be returned
-            // set the result to be returned.
             setResult(RESULT_OK, (new Intent()).setAction(mUri.toString()));
+
+            paste = Intent.ACTION_PASTE.equals(action);
 
         // If the action was other than EDIT or INSERT:
         } else {
@@ -202,33 +219,27 @@ public class NoteEditor extends Activity {
         /*
          * Using the URI passed in with the triggering Intent, gets the note or notes in
          * the provider.
-         * Note: This is being done on the UI thread. It will block the thread until the query
-         * completes. In a sample app, going against a simple provider based on a local database,
-         * the block will be momentary, but in a real app you should use
-         * android.content.AsyncQueryHandler or android.os.AsyncTask.
          */
         mCursor = managedQuery(
             mUri,         // The URI that gets multiple notes from the provider.
-            PROJECTION,   // A projection that returns the note ID and note content for each note.
+            PROJECTION,   // 标题、内容、修改时间与分类
             null,         // No "where" clause selection criteria.
             null,         // No "where" clause selection values.
             null          // Use the default sort order (modification date, descending)
         );
 
-        // For a paste, initializes the data from clipboard.
-        // (Must be done after mCursor is initialized.)
-        if (Intent.ACTION_PASTE.equals(action)) {
-            // Does the paste
-            performPaste();
-            // Switches the state to EDIT so the title can be modified.
-            mState = STATE_EDIT;
-        }
-
         // Sets the layout for this Activity. See res/layout/note_editor.xml
         setContentView(R.layout.note_editor);
 
-        // Gets a handle to the EditText in the the layout.
+        // 背景颜色跟随设置
+        applyChrome();
+
+        mTitle = (EditText) findViewById(R.id.editor_title);
         mText = (EditText) findViewById(R.id.note);
+        mTimeView = (TextView) findViewById(R.id.editor_time);
+
+        setupActions();
+        setupCategoryBar();
 
         /*
          * If this Activity had stopped previously, its state was written the ORIGINAL_CONTENT
@@ -236,16 +247,98 @@ public class NoteEditor extends Activity {
          */
         if (savedInstanceState != null) {
             mOriginalContent = savedInstanceState.getString(ORIGINAL_CONTENT);
+            mOriginalTitle = savedInstanceState.getString(ORIGINAL_TITLE);
         }
+
+        // For a paste, initializes the data from clipboard.
+        // (Must be done after views are ready.)
+        if (paste) {
+            performPaste();
+        }
+
+        // 新建笔记时直接聚焦标题并弹出键盘，少一次点击
+        if (mState == STATE_INSERT) {
+            mTitle.requestFocus();
+            mTitle.post(new Runnable() {
+                @Override
+                public void run() {
+                    InputMethodManager imm = (InputMethodManager)
+                            getSystemService(Context.INPUT_METHOD_SERVICE);
+                    if (imm != null) {
+                        imm.showSoftInput(mTitle, InputMethodManager.SHOW_IMPLICIT);
+                    }
+                }
+            });
+        }
+    }
+
+    /** 顶部操作栏：返回 / 删除 / 保存 */
+    private void setupActions() {        ImageButton back = (ImageButton) findViewById(R.id.btn_back);
+        ImageButton delete = (ImageButton) findViewById(R.id.btn_delete);
+        TextView save = (TextView) findViewById(R.id.btn_save);
+
+        back.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                finish();
+            }
+        });
+
+        delete.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                confirmDelete();
+            }
+        });
+
+        save.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (mCursor != null) {
+                    saveNote();
+                }
+                finish();
+            }
+        });
+    }
+
+    /** 让页面与系统导航栏使用同一套背景色 */
+    private void applyChrome() {
+        int bg = AppPrefs.getBackgroundColor(this);
+        findViewById(R.id.editor_root).setBackgroundColor(bg);
+        getWindow().setNavigationBarColor(bg);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            getWindow().getDecorView().setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+        }
+    }
+
+    private void setupCategoryBar() {
+        LinearLayout container = (LinearLayout) findViewById(R.id.editor_category_bar);
+        mCategoryBar = new ChipBar(this, container, CategoryUtil.NOTE_CATEGORIES,
+                indexOfCategory(mCategory), new ChipBar.Listener() {
+                    @Override
+                    public void onChipSelected(int index, String value) {
+                        mCategory = value;
+                    }
+                });
+        mCategoryBar.setColors(getColorRes(R.color.primary), 0xFFFFFFFF,
+                0xFFFFFFFF, getColorRes(R.color.ink_sub), true);
+        mCategoryBar.build();
+    }
+
+    private int indexOfCategory(String category) {
+        for (int i = 0; i < CategoryUtil.NOTE_CATEGORIES.length; i++) {
+            if (CategoryUtil.NOTE_CATEGORIES[i].equals(category)) {
+                return i;
+            }
+        }
+        return CategoryUtil.NOTE_CATEGORIES.length - 1;
     }
 
     /**
      * This method is called when the Activity is about to come to the foreground. This happens
      * when the Activity comes to the top of the task stack, OR when it is first starting.
-     *
-     * Moves to the first note in the list, sets an appropriate title for the action chosen by
-     * the user, puts the note contents into the TextView, and saves the original text as a
-     * backup.
      */
     @Override
     protected void onResume() {
@@ -260,76 +353,92 @@ public class NoteEditor extends Activity {
             mCursor.requery();
 
             /* Moves to the first record. Always call moveToFirst() before accessing data in
-             * a Cursor for the first time. The semantics of using a Cursor are that when it is
-             * created, its internal index is pointing to a "place" immediately before the first
-             * record.
+             * a Cursor for the first time.
              */
             mCursor.moveToFirst();
 
-            // Modifies the window title for the Activity according to the current Activity state.
-            if (mState == STATE_EDIT) {
-                // Set the title of the Activity to include the note title
-                int colTitleIndex = mCursor.getColumnIndex(NotePad.Notes.COLUMN_NAME_TITLE);
-                String title = mCursor.getString(colTitleIndex);
-                Resources res = getResources();
-                String text = String.format(res.getString(R.string.title_edit), title);
-                setTitle(text);
-            // Sets the title to "create" for inserts
-            } else if (mState == STATE_INSERT) {
-                setTitle(getText(R.string.title_create));
+            int titleIndex = mCursor.getColumnIndex(NotePad.Notes.COLUMN_NAME_TITLE);
+            int noteIndex = mCursor.getColumnIndex(NotePad.Notes.COLUMN_NAME_NOTE);
+            int categoryIndex = mCursor.getColumnIndex(NotePad.Notes.COLUMN_NAME_CATEGORY);
+            int modifiedIndex = mCursor.getColumnIndex(NotePad.Notes.COLUMN_NAME_MODIFICATION_DATE);
+
+            String title = titleIndex >= 0 ? mCursor.getString(titleIndex) : "";
+            String note = noteIndex >= 0 ? mCursor.getString(noteIndex) : "";
+            if (note == null) {
+                note = "";
+            }
+            if (title == null) {
+                title = "";
             }
 
-            /*
-             * onResume() may have been called after the Activity lost focus (was paused).
-             * The user was either editing or creating a note when the Activity paused.
-             * The Activity should re-display the text that had been retrieved previously, but
-             * it should not move the cursor. This helps the user to continue editing or entering.
-             */
+            if (categoryIndex >= 0) {
+                mCategory = CategoryUtil.normalize(mCursor.getString(categoryIndex));
+                mCategoryBar.setSelectedIndex(indexOfCategory(mCategory));
+            }
+            if (modifiedIndex >= 0) {
+                mModifiedMillis = mCursor.getLong(modifiedIndex);
+            }
 
             // Gets the note text from the Cursor and puts it in the TextView, but doesn't change
             // the text cursor's position.
-            int colNoteIndex = mCursor.getColumnIndex(NotePad.Notes.COLUMN_NAME_NOTE);
-            String note = mCursor.getString(colNoteIndex);
             mText.setTextKeepState(note);
+            if (mTitle.getText().length() == 0) {
+                mTitle.setTextKeepState(title);
+            }
 
             // Stores the original note text, to allow the user to revert changes.
             if (mOriginalContent == null) {
                 mOriginalContent = note;
             }
+            if (mOriginalTitle == null) {
+                mOriginalTitle = title;
+            }
+
+            // 记录刚读出来的内容，onPause 时用来判断是否真的有改动
+            mLoadedContent = note;
+            mLoadedTitle = mTitle.getText().toString();
+            mLoadedCategory = mCategory;
+
+            updateTimeLabel();
 
         /*
          * Something is wrong. The Cursor should always contain data. Report an error in the
          * note.
          */
         } else {
-            setTitle(getText(R.string.error_title));
+            mTitle.setText(getText(R.string.error_title));
             mText.setText(getText(R.string.error_message));
         }
+    }
+
+    /** 底部时间信息 */
+    private void updateTimeLabel() {
+        if (mTimeView == null) {
+            return;
+        }
+        if (mModifiedMillis <= 0) {
+            mTimeView.setText("");
+            return;
+        }
+        SimpleDateFormat format = new SimpleDateFormat(TIME_PATTERN, Locale.CHINA);
+        String text = format.format(new Date(mModifiedMillis));
+        mTimeView.setText(getString(
+                mState == STATE_INSERT ? R.string.editor_created : R.string.editor_modified, text));
     }
 
     /**
      * This method is called when an Activity loses focus during its normal operation, and is then
      * later on killed. The Activity has a chance to save its state so that the system can restore
      * it.
-     *
-     * Notice that this method isn't a normal part of the Activity lifecycle. It won't be called
-     * if the user simply navigates away from the Activity.
      */
     @Override
     protected void onSaveInstanceState(Bundle outState) {
-        // Save away the original text, so we still have it if the activity
-        // needs to be killed while paused.
         outState.putString(ORIGINAL_CONTENT, mOriginalContent);
+        outState.putString(ORIGINAL_TITLE, mOriginalTitle);
     }
 
     /**
      * This method is called when the Activity loses focus.
-     *
-     * For Activity objects that edit information, onPause() may be the one place where changes are
-     * saved. The Android application model is predicated on the idea that "save" and "exit" aren't
-     * required actions. When users navigate away from an Activity, they shouldn't have to go back
-     * to it to complete their work. The act of going away should save everything and leave the
-     * Activity in a state where Android can destroy it if necessary.
      *
      * If the user hasn't done anything, then this deletes or clears out the note, otherwise it
      * writes the user's work to the provider.
@@ -338,53 +447,48 @@ public class NoteEditor extends Activity {
     protected void onPause() {
         super.onPause();
 
-        /*
-         * Tests to see that the query operation didn't fail (see onCreate()). The Cursor object
-         * will exist, even if no records were returned, unless the query failed because of some
-         * exception or error.
-         *
-         */
-        if (mCursor != null) {
-
-            // Get the current note text.
-            String text = mText.getText().toString();
-            int length = text.length();
-
-            /*
-             * If the Activity is in the midst of finishing and there is no text in the current
-             * note, returns a result of CANCELED to the caller, and deletes the note. This is done
-             * even if the note was being edited, the assumption being that the user wanted to
-             * "clear out" (delete) the note.
-             */
-            if (isFinishing() && (length == 0)) {
-                setResult(RESULT_CANCELED);
-                deleteNote();
-
-                /*
-                 * Writes the edits to the provider. The note has been edited if an existing note was
-                 * retrieved into the editor *or* if a new note was inserted. In the latter case,
-                 * onCreate() inserted a new empty note into the provider, and it is this new note
-                 * that is being edited.
-                 */
-            } else if (mState == STATE_EDIT) {
-                // Creates a map to contain the new values for the columns
-                updateNote(text, null);
-            } else if (mState == STATE_INSERT) {
-                updateNote(text, text);
-                mState = STATE_EDIT;
-          }
+        if (mCursor == null) {
+            return;
         }
+
+        String text = mText.getText().toString();
+        String title = mTitle.getText().toString().trim();
+
+        // 新建的笔记什么都没写就离开：直接丢弃，避免列表里多出一条空笔记
+        if (mState == STATE_INSERT && text.length() == 0 && title.length() == 0) {
+            deleteNote();
+            if (!isFinishing()) {
+                finish();
+            }
+            return;
+        }
+
+        /*
+         * If the Activity is in the midst of finishing and there is no text in the current
+         * note, returns a result of CANCELED to the caller, and deletes the note.
+         */
+        if (isFinishing() && text.length() == 0 && title.length() == 0) {
+            setResult(RESULT_CANCELED);
+            deleteNote();
+            return;
+        }
+
+        // 只有内容真的变了才写回，避免只是"看一眼"就把修改时间刷新
+        if (isDirty(text, title)) {
+            saveNote();
+        }
+    }
+
+    /** 内容、标题、分类是否与刚读出来时不同 */
+    private boolean isDirty(String text, String title) {
+        return !text.equals(mLoadedContent)
+                || !title.equals(mLoadedTitle)
+                || !mCategory.equals(mLoadedCategory);
     }
 
     /**
      * This method is called when the user clicks the device's Menu button the first time for
-     * this Activity. Android passes in a Menu object that is populated with items.
-     *
-     * Builds the menus for editing and inserting, and adds in alternative actions that
-     * registered themselves to handle the MIME types for this application.
-     *
-     * @param menu A Menu object to which items should be added.
-     * @return True to display the menu.
+     * this Activity.
      */
     @Override
     public boolean onCreateOptionsMenu(Menu menu) {
@@ -392,13 +496,8 @@ public class NoteEditor extends Activity {
         MenuInflater inflater = getMenuInflater();
         inflater.inflate(R.menu.editor_options_menu, menu);
 
-        // Only add extra menu items for a saved note 
-        if (mState == STATE_EDIT) {
-            // Append to the
-            // menu items for any other activities that can do stuff with it
-            // as well.  This does a query on the system for any activities that
-            // implement the ALTERNATIVE_ACTION for our data, adding a menu item
-            // for each one that is found.
+        // Only add extra menu items for a saved note
+        if (mState == STATE_EDIT && mUri != null) {
             Intent intent = new Intent(null, mUri);
             intent.addCategory(Intent.CATEGORY_ALTERNATIVE);
             menu.addIntentOptions(Menu.CATEGORY_ALTERNATIVE, 0, 0,
@@ -410,34 +509,25 @@ public class NoteEditor extends Activity {
 
     @Override
     public boolean onPrepareOptionsMenu(Menu menu) {
-        // Check if note has changed and enable/disable the revert option
-        int colNoteIndex = mCursor.getColumnIndex(NotePad.Notes.COLUMN_NAME_NOTE);
-        String savedNote = mCursor.getString(colNoteIndex);
-        String currentNote = mText.getText().toString();
-        if (savedNote.equals(currentNote)) {
-            menu.findItem(R.id.menu_revert).setVisible(false);
-        } else {
-            menu.findItem(R.id.menu_revert).setVisible(true);
+        MenuItem revert = menu.findItem(R.id.menu_revert);
+        if (revert != null) {
+            boolean changed = !mText.getText().toString().equals(
+                    mOriginalContent == null ? "" : mOriginalContent);
+            revert.setVisible(changed);
         }
         return super.onPrepareOptionsMenu(menu);
     }
 
     /**
-     * This method is called when a menu item is selected. Android passes in the selected item.
-     * The switch statement in this method calls the appropriate method to perform the action the
-     * user chose.
-     *
-     * @param item The selected MenuItem
-     * @return True to indicate that the item was processed, and no further work is necessary. False
-     * to proceed to further processing as indicated in the MenuItem object.
+     * This method is called when a menu item is selected.
      */
     @Override
     public boolean onOptionsItemSelected(MenuItem item) {
-        // Handle all of the possible menu actions.
         int id = item.getItemId();
-        if(id== R.id.menu_save) {
-            String text = mText.getText().toString();
-            updateNote(text, null);
+        if (id == R.id.menu_save) {
+            if (mCursor != null) {
+                saveNote();
+            }
             finish();
         } else if (id == R.id.menu_delete) {
             deleteNote();
@@ -448,11 +538,10 @@ public class NoteEditor extends Activity {
         return super.onOptionsItemSelected(item);
     }
 
-//BEGIN_INCLUDE(paste)
     /**
      * A helper method that replaces the note's data with the contents of the clipboard.
      */
-    private final void performPaste() {
+    private void performPaste() {
 
         // Gets a handle to the Clipboard Manager
         ClipboardManager clipboard = (ClipboardManager)
@@ -463,134 +552,122 @@ public class NoteEditor extends Activity {
 
         // Gets the clipboard data from the clipboard
         ClipData clip = clipboard.getPrimaryClip();
-        if (clip != null) {
-
-            String text=null;
-            String title=null;
-
-            // Gets the first item from the clipboard data
-            ClipData.Item item = clip.getItemAt(0);
-
-            // Tries to get the item's contents as a URI pointing to a note
-            Uri uri = item.getUri();
-
-            // Tests to see that the item actually is an URI, and that the URI
-            // is a content URI pointing to a provider whose MIME type is the same
-            // as the MIME type supported by the Note pad provider.
-            if (uri != null && NotePad.Notes.CONTENT_ITEM_TYPE.equals(cr.getType(uri))) {
-
-                // The clipboard holds a reference to data with a note MIME type. This copies it.
-                Cursor orig = cr.query(
-                        uri,            // URI for the content provider
-                        PROJECTION,     // Get the columns referred to in the projection
-                        null,           // No selection variables
-                        null,           // No selection variables, so no criteria are needed
-                        null            // Use the default sort order
-                );
-
-                // If the Cursor is not null, and it contains at least one record
-                // (moveToFirst() returns true), then this gets the note data from it.
-                if (orig != null) {
-                    if (orig.moveToFirst()) {
-                        int colNoteIndex = mCursor.getColumnIndex(NotePad.Notes.COLUMN_NAME_NOTE);
-                        int colTitleIndex = mCursor.getColumnIndex(NotePad.Notes.COLUMN_NAME_TITLE);
-                        text = orig.getString(colNoteIndex);
-                        title = orig.getString(colTitleIndex);
-                    }
-
-                    // Closes the cursor.
-                    orig.close();
-                }
-            }
-
-            // If the contents of the clipboard wasn't a reference to a note, then
-            // this converts whatever it is to text.
-            if (text == null) {
-                text = item.coerceToText(this).toString();
-            }
-
-            // Updates the current note with the retrieved title and text.
-            updateNote(text, title);
+        if (clip == null) {
+            return;
         }
+
+        String text = null;
+        String title = null;
+
+        // Gets the first item from the clipboard data
+        ClipData.Item item = clip.getItemAt(0);
+
+        // Tries to get the item's contents as a URI pointing to a note
+        Uri uri = item.getUri();
+
+        // Tests to see that the item actually is an URI, and that the URI
+        // is a content URI pointing to a provider whose MIME type is the same
+        // as the MIME type supported by the Note pad provider.
+        if (uri != null && NotePad.Notes.CONTENT_ITEM_TYPE.equals(cr.getType(uri))) {
+
+            // The clipboard holds a reference to data with a note MIME type. This copies it.
+            Cursor orig = cr.query(uri, PROJECTION, null, null, null);
+
+            // If the Cursor is not null, and it contains at least one record
+            // (moveToFirst() returns true), then this gets the note data from it.
+            if (orig != null) {
+                if (orig.moveToFirst()) {
+                    int noteIndex = orig.getColumnIndex(NotePad.Notes.COLUMN_NAME_NOTE);
+                    int titleIndex = orig.getColumnIndex(NotePad.Notes.COLUMN_NAME_TITLE);
+                    text = noteIndex >= 0 ? orig.getString(noteIndex) : null;
+                    title = titleIndex >= 0 ? orig.getString(titleIndex) : null;
+                }
+                orig.close();
+            }
+        }
+
+        // If the contents of the clipboard wasn't a reference to a note, then
+        // this converts whatever it is to text.
+        if (text == null) {
+            text = item.coerceToText(this).toString();
+        }
+
+        mText.setText(text);
+        if (title != null) {
+            mTitle.setText(title);
+        }
+
+        // 粘贴后立即写入 provider，避免退出时被当成空笔记删掉
+        saveNote();
     }
-//END_INCLUDE(paste)
 
     /**
-     * Replaces the current note contents with the text and title provided as arguments.
-     * @param text The new note contents to use.
-     * @param title The new note title to use
+     * 把当前编辑的内容写回 provider：标题、正文、分类以及修改时间。
      */
-    private final void updateNote(String text, String title) {
+    private void saveNote() {
+        String body = mText.getText().toString();
+        String title = mTitle.getText().toString().trim();
+        if (title.length() == 0) {
+            title = deriveTitle(body);
+            // 把自动生成的标题回填到输入框，用户下次打开能看到
+            mTitle.setText(title);
+        }
 
-        // Sets up a map to contain values to be updated in the provider.
+        long now = System.currentTimeMillis();
+
         ContentValues values = new ContentValues();
-        values.put(NotePad.Notes.COLUMN_NAME_MODIFICATION_DATE, System.currentTimeMillis());
+        values.put(NotePad.Notes.COLUMN_NAME_MODIFICATION_DATE, now);
+        values.put(NotePad.Notes.COLUMN_NAME_TITLE, title);
+        values.put(NotePad.Notes.COLUMN_NAME_NOTE, body);
+        values.put(NotePad.Notes.COLUMN_NAME_CATEGORY, mCategory);
 
-        // If the action is to insert a new note, this creates an initial title for it.
-        if (mState == STATE_INSERT) {
+        getContentResolver().update(mUri, values, null, null);
 
-            // If no title was provided as an argument, create one from the note text.
-            if (title == null) {
-  
-                // Get the note's length
-                int length = text.length();
+        mModifiedMillis = now;
+        mState = STATE_EDIT;
 
-                // Sets the title by getting a substring of the text that is 31 characters long
-                // or the number of characters in the note plus one, whichever is smaller.
-                title = text.substring(0, Math.min(30, length));
-  
-                // If the resulting length is more than 30 characters, chops off any
-                // trailing spaces
-                if (length > 30) {
-                    int lastSpace = title.lastIndexOf(' ');
-                    if (lastSpace > 0) {
-                        title = title.substring(0, lastSpace);
-                    }
-                }
-            }
-            // In the values map, sets the value of the title
-            values.put(NotePad.Notes.COLUMN_NAME_TITLE, title);
-        } else if (title != null) {
-            // In the values map, sets the value of the title
-            values.put(NotePad.Notes.COLUMN_NAME_TITLE, title);
+        // 同步"已保存"快照，避免 onPause 再写一次
+        mLoadedContent = body;
+        mLoadedTitle = title;
+        mLoadedCategory = mCategory;
+
+        updateTimeLabel();
+    }
+
+    /** 没填标题时，用正文第一行前 30 个字作为标题 */
+    private String deriveTitle(String body) {
+        if (body == null) {
+            return "无标题";
         }
-
-        // This puts the desired notes text into the map.
-        values.put(NotePad.Notes.COLUMN_NAME_NOTE, text);
-
-        /*
-         * Updates the provider with the new values in the map. The ListView is updated
-         * automatically. The provider sets this up by setting the notification URI for
-         * query Cursor objects to the incoming URI. The content resolver is thus
-         * automatically notified when the Cursor for the URI changes, and the UI is
-         * updated.
-         * Note: This is being done on the UI thread. It will block the thread until the
-         * update completes. In a sample app, going against a simple provider based on a
-         * local database, the block will be momentary, but in a real app you should use
-         * android.content.AsyncQueryHandler or android.os.AsyncTask.
-         */
-        getContentResolver().update(
-                mUri,    // The URI for the record to update.
-                values,  // The map of column names and new values to apply to them.
-                null,    // No selection criteria are used, so no where columns are necessary.
-                null     // No where columns are used, so no where arguments are necessary.
-            );
-
-
+        String firstLine = body.trim();
+        int newLine = firstLine.indexOf('\n');
+        if (newLine > 0) {
+            firstLine = firstLine.substring(0, newLine).trim();
+        }
+        if (firstLine.length() == 0) {
+            return "无标题";
+        }
+        if (firstLine.length() > 30) {
+            firstLine = firstLine.substring(0, 30).trim();
+        }
+        return firstLine;
     }
 
     /**
-     * This helper method cancels the work done on a note.  It deletes the note if it was
-     * newly created, or reverts to the original text of the note i
+     * This helper method cancels the work done on a note. It deletes the note if it was
+     * newly created, or reverts to the original text of the note.
      */
-    private final void cancelNote() {
+    private void cancelNote() {
         if (mCursor != null) {
             if (mState == STATE_EDIT) {
                 // Put the original note text back into the database
                 mCursor.close();
                 mCursor = null;
                 ContentValues values = new ContentValues();
-                values.put(NotePad.Notes.COLUMN_NAME_NOTE, mOriginalContent);
+                values.put(NotePad.Notes.COLUMN_NAME_NOTE,
+                        mOriginalContent == null ? "" : mOriginalContent);
+                values.put(NotePad.Notes.COLUMN_NAME_TITLE,
+                        mOriginalTitle == null ? "" : mOriginalTitle);
                 getContentResolver().update(mUri, values, null, null);
             } else if (mState == STATE_INSERT) {
                 // We inserted an empty note, make sure to delete it
@@ -601,15 +678,36 @@ public class NoteEditor extends Activity {
         finish();
     }
 
+    private void confirmDelete() {
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.menu_delete)
+                .setMessage("删除后无法恢复，确定删除这条笔记吗？")
+                .setPositiveButton(R.string.menu_delete, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        deleteNote();
+                        finish();
+                    }
+                })
+                .setNegativeButton(R.string.button_cancel, null)
+                .show();
+    }
+
     /**
-     * Take care of deleting a note.  Simply deletes the entry.
+     * Take care of deleting a note. Simply deletes the entry.
      */
-    private final void deleteNote() {
+    private void deleteNote() {
         if (mCursor != null) {
             mCursor.close();
             mCursor = null;
             getContentResolver().delete(mUri, null, null);
             mText.setText("");
+            mTitle.setText("");
         }
+    }
+
+    @SuppressWarnings("deprecation")
+    private int getColorRes(int resId) {
+        return getResources().getColor(resId);
     }
 }

@@ -123,6 +123,14 @@ public final class NotePad {
          */
         public static final String DEFAULT_SORT_ORDER = "modified DESC";
 
+        /**
+         * 可选择的时间排序方式（笔记列表使用）
+         */
+        public static final String SORT_MODIFIED_DESC = "modified DESC";
+        public static final String SORT_MODIFIED_ASC = "modified ASC";
+        public static final String SORT_CREATED_DESC = "created DESC";
+        public static final String SORT_CREATED_ASC = "created ASC";
+
         /*
          * Column definitions
          */
@@ -150,5 +158,16 @@ public final class NotePad {
          * <P>Type: INTEGER (long from System.curentTimeMillis())</P>
          */
         public static final String COLUMN_NAME_MODIFICATION_DATE = "modified";
+
+        /**
+         * 笔记所属分类
+         * <P>Type: TEXT</P>
+         */
+        public static final String COLUMN_NAME_CATEGORY = "category";
+
+        /**
+         * 笔记未指定分类时使用的默认分类
+         */
+        public static final String DEFAULT_CATEGORY = "其他";
     }
 }
