@@ -8,12 +8,10 @@
 ## 目录
 
 - [功能特性](#功能特性)
+- [界面预览](#界面预览)
 - [界面与操作](#界面与操作)
 - [技术实现](#技术实现)
 - [项目结构](#项目结构)
-- [构建与运行](#构建与运行)
-- [已知限制](#已知限制)
-- [参考与许可](#参考与许可)
 
 ---
 
@@ -42,6 +40,20 @@
 - **标题自动生成**：标题留空时，自动取正文首行作为标题。
 - **只读不脏写**：打开笔记不做修改就返回，**不会**刷新修改时间、不会把笔记顶到列表最前（原示例存在这个问题）。
 - **空白笔记自动清理**：新建后什么都没写就退出，这条笔记会被自动删除。
+
+---
+
+## 界面预览
+
+| 笔记列表 | 搜索（标题 / 内容） | 编辑页 |
+| :---: | :---: | :---: |
+| <img src="docs/list.png" width="220"> | <img src="docs/search.png" width="220"> | <img src="docs/editor.png" width="220"> |
+| 分类色条、彩色标签、右下角时间戳 | 输入即筛，标题与正文同时匹配 | 顶部分类切换，底部显示创建时间 |
+
+| 排序方式 | 背景颜色 |
+| :---: | :---: |
+| <img src="docs/sort.png" width="220"> | <img src="docs/theme.png" width="220"> |
+| 修改时间 / 创建时间 × 由新到旧 / 由旧到新 | 六套配色，列表页与编辑页同步生效 |
 
 ---
 
@@ -119,44 +131,7 @@ try {
 | `TitleEditor.java` | 167 | 官方示例保留的「单独编辑标题」入口 |
 | `NotesLiveFolder.java` | 113 | 官方示例保留的 Live Folder 支持 |
 
-### 几个关键点
 
-**1. 搜索去抖 + 条件组合**
-每次输入不立即查库，`Handler.postDelayed` 延迟 180ms，连续输入会不断取消上一次任务，只查最后一次：
-
-```java
-private static final long SEARCH_DEBOUNCE = 180L;
-// afterTextChanged 中：
-mHandler.removeCallbacks(mSearchTask);
-mHandler.postDelayed(mSearchTask, SEARCH_DEBOUNCE);
-```
-
-分类与关键词用 `StringBuilder` 拼成组合条件，参数全部走 `?` 占位符，避免 SQL 注入：
-
-```java
-selection.append("(" + COLUMN_NAME_TITLE + " LIKE ? OR " + COLUMN_NAME_NOTE + " LIKE ?)");
-```
-
-**2. 脏数据判断，避免无意义写库**
-进入编辑页时对标题 / 正文 / 分类做一次快照，`onPause` 时比对，只有真正变化才 `update` 并刷新 `modified`。这修掉了原示例「看一眼就把笔记顶到最前」的老毛病。
-
-**3. 游标生命周期**
-`CursorAdapter.changeCursor()` 会自行关闭旧游标，因此在 `requery()` 里只调用 `changeCursor`，不再手动 `close`，否则可能重复关闭抛异常；`onDestroy` 里才统一 `changeCursor(null)` 释放。
-
-**4. 自定义 View 做胶囊栏**
-`ChipBar` 不是 `View` 子类，而是一个「渲染器」：构造时接收外部传入的 `LinearLayout` 容器与数据数组，按需生成圆角 `TextView`（背景用 `GradientDrawable` 动态绘制），并通过 `Listener` 回调把选中项抛给调用方。选中态与普通态的配色由调用方设置，因此同一份逻辑能在列表页（深色底、白色选中）和编辑页（浅色底、主题色选中）两边复用。
-
-**5. 主题贯穿全链路**
-背景色不只作用在根布局：列表页根容器、编辑页根容器、系统导航栏（`getWindow().setNavigationBarColor()`）都取自 `AppPrefs.getBackgroundColor()`；状态栏固定为品牌蓝 `@color/primary`，与渐变顶栏连成一体。卡片始终保持白色，保证任何主题下都有足够对比度。
-
-**6. XML 里的内部类写法**
-`NoteEditor` 内部自定义了带横线的 `EditText`，布局中不能写 `<com.example.android.notepad.NoteEditor$LinedEditText>`（`$` 不是合法 XML 名称字符），必须写成：
-
-```xml
-<view class="com.example.android.notepad.NoteEditor$LinedEditText" ... />
-```
-
----
 
 ## 项目结构
 
@@ -191,55 +166,3 @@ NotePad/
 
 ---
 
-## 构建与运行
-
-### 环境
-
-| 项 | 版本 |
-| --- | --- |
-| Android Gradle Plugin | 8.12.2 |
-| Gradle | 8.13 |
-| JDK | 17 |
-| compileSdk / buildTools | 37 / 36.0.0 |
-| minSdk / targetSdk | 21 / 34 |
-
-仓库里的 `gradle-wrapper.properties` 指向腾讯云镜像，`build.gradle` 优先走阿里云 Maven 镜像，国内网络下首次构建会快很多。
-
-### 命令行
-
-```bash
-# 编译 Debug 包
-./gradlew assembleDebug
-
-# 产物位置
-app/build/outputs/apk/debug/app-debug.apk
-```
-
-跑到设备上：
-
-```bash
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-adb shell am start -n com.example.android.notepad/.NotesList
-```
-
-### Android Studio
-
-直接 `File → Open` 打开项目根目录，等待 Gradle sync 完成后点 Run 即可。`local.properties` 里的 SDK 路径由 IDE 自动生成，已被 `.gitignore` 排除。
-
----
-
-## 已知限制
-
-- **搜索基于 SQL `LIKE`**：只做子串匹配，没有分词、拼音检索或相关性排序。
-- **分类是固定五类**：写在 `CategoryUtil` 中，暂不支持用户自定义增删。
-- **数据库升级的降级分支会丢数据**：正常路径走 `ALTER TABLE` 不丢数据；仅当加列失败时才重建表（这是为兼容异常旧库留的兜底）。
-- **无云同步 / 无导出**：数据只存在本机 `notepad.db`，卸载应用即丢失。
-- **targetSdk 34**：在 Android 15 及以上系统上需自行确认运行时行为（本项目已在 API 35 模拟器实测通过）。
-
----
-
-## 参考与许可
-
-- 原始工程：[Android Sample — NotePad](https://github.com/android/platform_development/tree/master/samples/NotePad)
-- 源码解析：[Android Sample--NotePad 解析](https://blog.csdn.net/llfjfz/article/details/67638499)
-- 本项目沿用官方示例的 **Apache License 2.0**，详见源文件头部声明。
