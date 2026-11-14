@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 排序弹窗选项，顺序需与 AppPrefs.SORT_ORDERS 保持一致 -->
+    <string-array name="sort_options">
+        <item>@string/sort_modified_desc</item>
+        <item>@string/sort_modified_asc</item>
+        <item>@string/sort_created_desc</item>
+        <item>@string/sort_created_asc</item>
+    </string-array>
+</resources>

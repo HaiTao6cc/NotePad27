@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- 主色 -->
+    <color name="primary">#4C6FFF</color>
+    <color name="primary_dark">#3A56D4</color>
+    <color name="primary_light">#7B5CFF</color>
+
+    <!-- 文字 -->
+    <color name="ink">#1F2430</color>
+    <color name="ink_sub">#8A93A6</color>
+    <color name="ink_faint">#B6BECB</color>
+    <color name="white">#FFFFFF</color>
+
+    <!-- 页面底色（可被用户设置覆盖） -->
+    <color name="page_bg">#F3F6FF</color>
+    <color name="card_bg">#FFFFFF</color>
+    <color name="card_stroke">#14000000</color>
+    <color name="divider">#1A000000</color>
+
+    <!-- 分类标识色 -->
+    <color name="cat_work">#4C6FFF</color>
+    <color name="cat_life">#FF9F43</color>
+    <color name="cat_study">#22B573</color>
+    <color name="cat_idea">#A55EEA</color>
+    <color name="cat_other">#8395A7</color>
+
+</resources>
