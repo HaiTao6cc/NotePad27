@@ -2,8 +2,6 @@
 
 基于 Android 官方 **NotePad** 示例扩展而来的本地记事本应用。在保留 `ContentProvider + SQLite` 原始架构的前提下，补齐了时间戳、搜索、分类、排序、换肤等能力，并重做了整套界面。
 
-> 技术栈：Java · ContentProvider · SQLite · 原生 View / 自定义 View · Gradle
-> 无任何第三方依赖，不使用 AppCompat / Material / Room。
 
 ---
 
